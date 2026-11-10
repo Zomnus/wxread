@@ -82,6 +82,7 @@ headers = {
 # 混进阅读池（见文件末尾的“阅读池自动识别”）。这里的条目仅在没有可用抓包时兜底。
 DEFAULT_POOL = [
     {
+        "label": "三体（默认条目）",
         "b": "ce032b305a9bc1ce0b0dd2a",          # 书籍 ID（三体）
         "bookId": "3300060341",                   # 同一本书的数字 bookId（用于 chapterInfos 修复）
         "c": "7f632b502707f6ffaa6bf2e",          # 章节/内容块 ID
@@ -255,10 +256,25 @@ CURL_SPLIT_RE = re.compile(r'\n\s*\n|^\s*#\s*[-=]{3,}.*$', re.M)
 
 
 def split_curls(text):
-    """把粘贴在一起的多个 curl 命令拆开（空行或 #---- 分隔线）"""
+    """把粘贴在一起的多个 curl 命令拆开（空行或 #---- 分隔线）
+
+    每段的第一行如果是 # 开头的普通注释（如 "# 三体"），会作为该条目的
+    label 返回——日志里用它标识书籍，比加密 ID 好认。返回 [(label, curl)]。
+    """
     if not text:
         return []
-    return [part.strip() for part in CURL_SPLIT_RE.split(text) if 'curl' in part]
+    result = []
+    for part in CURL_SPLIT_RE.split(text):
+        if 'curl' not in part:
+            continue
+        label = ''
+        lines = [line.strip() for line in part.strip().splitlines()]
+        if lines and lines[0].startswith('#'):
+            label = lines[0].lstrip('#').strip()
+            part = '\n'.join(line for line in part.splitlines()
+                             if not line.strip().startswith('#'))
+        result.append((label, part.strip()))
+    return result
 
 
 def _book_id_from_headers(headers):
@@ -268,7 +284,7 @@ def _book_id_from_headers(headers):
     return match.group(1) if match else ''
 
 
-def entry_from_curl(curl_command):
+def entry_from_curl(curl_command, label=''):
     """从一条 read 请求的 curl 生成阅读池条目；不是 read 报文时返回 None"""
     info = parse_curl_request(curl_command)
     if not info or not info['body']:
@@ -280,6 +296,8 @@ def entry_from_curl(curl_command):
     if not isinstance(payload, dict) or any(f not in payload for f in POOL_FIELDS):
         return None
     entry = {
+        # label：粘贴时写在抓包前的 "# 书名" 注释，日志里用来标识条目
+        'label': label,
         'b': payload['b'],
         'bookId': _book_id_from_headers(info['headers']),
         'c': payload['c'],
@@ -311,8 +329,8 @@ def merge_pool(*pools):
 
 _extra_bash = [os.getenv(f'WXREAD_CURL_BASH_{i}') for i in range(2, 6)]
 CURL_POOL = []
-for _curl in split_curls(curl_str) + [c for c in _extra_bash if c and c.strip()]:
-    _entry = entry_from_curl(_curl)
+for _label, _curl in split_curls(curl_str) + split_curls('\n\n'.join(c for c in _extra_bash if c and c.strip())):
+    _entry = entry_from_curl(_curl, _label)
     if _entry:
         CURL_POOL.append(_entry)
 

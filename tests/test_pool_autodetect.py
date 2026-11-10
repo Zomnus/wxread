@@ -139,6 +139,24 @@ class TestAutoDetect(PoolTestBase):
         self.assertIn('bookDetail/3300060341', cfg.CURL_POOL[0]['referer'])
         self.assertIn('bookDetail/4400012345', cfg.CURL_POOL[1]['referer'])
 
+    def test_label_from_comment_line(self):
+        """每条抓包前可加一行 "# 书名" 注释，作为日志里可读的标签"""
+        cfg = self.load(WXREAD_CURL_BASH='# 三体\n' + CURL_A + '\n\n' + '# 第二本书\n' + CURL_B)
+        self.assertEqual(cfg.CURL_POOL[0]['label'], '三体')
+        self.assertEqual(cfg.CURL_POOL[1]['label'], '第二本书')
+        self.assertEqual(len(cfg.CURL_POOL), 2)
+
+    def test_label_in_extra_env(self):
+        cfg = self.load(WXREAD_CURL_BASH='# 三体\n' + CURL_A,
+                        WXREAD_CURL_BASH_2='# 另一本\n' + CURL_B)
+        self.assertEqual([e['label'] for e in cfg.CURL_POOL], ['三体', '另一本'])
+
+    def test_separator_line_is_not_label(self):
+        cfg = self.load(WXREAD_CURL_BASH=CURL_A + '\n#-------------------\n' + CURL_B)
+        self.assertEqual(cfg.CURL_POOL[0]['label'], '')
+        self.assertEqual(cfg.CURL_POOL[1]['label'], '')
+        self.assertEqual(len(cfg.CURL_POOL), 2)
+
 
 class TestApplySessionReferer(unittest.TestCase):
     def test_referer_follows_selected_book(self):
@@ -179,6 +197,32 @@ class TestResolveBookId(unittest.TestCase):
         import main
         with mock.patch.object(main, 'READ_POOL', [{'bookId': ''}]):
             self.assertEqual(main.resolve_book_id({'bookId': ''}), '')
+
+
+class TestDescribeEntry(unittest.TestCase):
+    def test_with_label(self):
+        import main
+        entry = {'label': '三体', 'b': 'ce032b305a9bc1ce0b0dd2a', 'bookId': '3300060341',
+                 'ci': 27, 'co': 389, 'sm': '19聚会《三体》网友的聚会地点是一处僻静'}
+        text = main.describe_entry(entry)
+        self.assertIn('三体', text)
+        self.assertIn('bookId=3300060341', text)
+        self.assertIn('ci=27', text)
+        self.assertIn('摘要：19聚会《三体》网友的聚会地', text)   # 截断到 18 字
+        self.assertNotIn('未知', text)
+
+    def test_without_label_shows_b_prefix(self):
+        import main
+        entry = {'b': 'ce032b305a9bc1ce0b0dd2a', 'bookId': '', 'ci': 4, 'co': 352, 'sm': 'x'}
+        text = main.describe_entry(entry)
+        self.assertIn('b=ce032b305a', text)
+        self.assertIn('bookId=未知（无 referer，不影响上报）', text)
+
+    def test_without_label_and_b(self):
+        import main
+        text = main.describe_entry({'bookId': '', 'ci': 1, 'co': 1, 'sm': ''})
+        self.assertIn('bookId=未知', text)
+        self.assertIn('b=', text)
 
 
 if __name__ == '__main__':

@@ -353,6 +353,18 @@ def apply_session_referer(session):
         headers[key] = referer
 
 
+def describe_entry(session):
+    """生成一条池条目的可读描述，用于日志（ label / b 前缀 / bookId / 位置 / 摘要）"""
+    label = str(session.get('label') or '').strip()
+    name = label or f"b={str(session.get('b'))[:10]}…"
+    book_id = str(session.get('bookId') or '').strip()
+    if not book_id:
+        book_id = '未知（无 referer，不影响上报）'
+    summary = str(session.get('sm') or '')
+    summary = summary[:18] + ('…' if len(summary) > 18 else '')
+    return f"{name}｜bookId={book_id}｜ci={session.get('ci')}，起始 co={session.get('co')}｜摘要：{summary}"
+
+
 def run_session(refresh_print):
     """执行一次完整阅读会话
 
@@ -371,10 +383,7 @@ def run_session(refresh_print):
     session = random.choice(READ_POOL)
     session_book_id = resolve_book_id(session)
     apply_session_referer(session)
-    logging.info(
-        "本次会话书籍 bookId=%s（ci=%s，起始 co=%s）",
-        session_book_id or '未知（抓包未带 referer）', session['ci'], session['co'],
-    )
+    logging.info("本次会话书籍：%s", describe_entry(session))
     progress = 0
     credited_seconds = 0
     session_start = time.time()
@@ -547,6 +556,8 @@ def main():
             "想加入自己正在读的书，抓一条 read 请求塞进同一个 secret 即可）",
             len(READ_POOL),
         )
+    for position, entry in enumerate(READ_POOL, 1):
+        logging.info("阅读池条目 %d/%d：%s", position, len(READ_POOL), describe_entry(entry))
 
     placeholder_books = [e.get('bookId') for e in READ_POOL if str(e.get('bookId', '')).startswith('TODO')]
     if placeholder_books:
