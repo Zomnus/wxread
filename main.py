@@ -68,6 +68,9 @@ PROGRESS_MAX_CHARS = 240        # 每次成功上报后 co 前进量上限
 PROGRESS_CAP = 3000             # 单会话总推进量上限（避免超出章节范围）
 PROGRESS_PER_PR = 800           # co 每前进该值，pr 前进 1
 
+# 单次会话硬上限（秒）：防止配置异常/网络反复重试导致 Action 跑到 6 小时超时
+MAX_SESSION_SECONDS = 3 * 3600
+
 
 def http_post(url, **kwargs):
     """统一 POST 入口：curl_cffi 后端自动附加浏览器指纹模拟"""
@@ -116,7 +119,9 @@ def get_wr_skey():
 
             new_skey = response.cookies.get('wr_skey')
             if new_skey:
-                return new_skey[:8]
+                # 不截断：wr_skey 当前为 8 位，但截断会在服务端换成长值时
+                # 写入无效 cookie（导出的 curl 会带着残缺密钥，下次运行即失效）
+                return new_skey
         except RequestException as exc:
             logging.warning(f"refresh_cookie 请求失败，payload={cookie_data}，原因：{exc}")
             continue
@@ -159,30 +164,35 @@ def refresh_cookie(strict=True):
 # ---------------------------------------------------------------------------
 # cookie 导出与回写（P1-4）
 # 运行结束（无论成败）把内存中最新的 cookie 写为 curl_bash 格式文件，
-# Actions 形态可配 PAT 后由 workflow 用 gh secret set 回写仓库 secret；
-# 本地/Docker 形态可直接把该文件内容作为 WXREAD_CURL_BASH 复用。
+# GitHub Actions 形态可配 PAT 后由 workflow 用 gh secret set 回写仓库 secret；
+# 本地运行可直接把该文件内容作为 WXREAD_CURL_BASH 复用。
 # ---------------------------------------------------------------------------
 def build_curl_with_cookies(curl_command, cookies, headers):
-    """用最新 cookies 重建 curl_bash 命令（保留原始抓包的其余 headers）"""
+    """用最新 cookies 重建 curl_bash 命令（保留原始抓包的其余 headers）
+
+    同时兼容四种 cookie 写法（bash 单引号 / Windows cmd 双引号 × -H、-b），
+    否则导出后的 secret 会带着旧 cookie 或重复的 cookie 头。
+    """
     cookie_header = '; '.join(f"{k}={v}" for k, v in cookies.items())
 
     if curl_command:
         new_command = curl_command
-        if re.search(r"-H\s+'[Cc]ookie:[^']*'", new_command):
-            new_command = re.sub(
-                r"(-H\s+'[Cc]ookie:\s)[^']*'",
-                lambda m: m.group(1) + cookie_header + "'",
-                new_command,
-            )
-        elif re.search(r"-b\s+'[^']*'", new_command):
-            new_command = re.sub(
-                r"(-b\s')[^']*'",
-                lambda m: m.group(1) + cookie_header + "'",
-                new_command,
-            )
-        else:
-            new_command = new_command.rstrip() + f" \\\n  -H 'cookie: {cookie_header}'"
-        return new_command
+        # 先替换 -H 'cookie: ...' / -H "cookie: ..."
+        for pattern, quote in (
+            (r"(-H\s+'[Cc]ookie:\s)[^']*'", "'"),
+            (r'(-H\s+"[Cc]ookie:\s)[^"]*"', '"'),
+        ):
+            if re.search(pattern, new_command):
+                return re.sub(pattern, lambda m: m.group(1) + cookie_header + quote, new_command)
+        # 再替换 -b '...' / -b "..."
+        for pattern, quote in (
+            (r"(-b\s+')([^']*)'", "'"),
+            (r'(-b\s+")([^"]*)"', '"'),
+        ):
+            if re.search(pattern, new_command):
+                return re.sub(pattern, lambda m: m.group(1) + cookie_header + quote, new_command)
+        # 原命令没有 cookie：追加一条（Data 段会在下次解析时被忽略，不影响使用）
+        return new_command.rstrip() + f" \\\n  -H 'cookie: {cookie_header}'"
 
     # 无原始 curl：用当前 headers 合成一条最小可用命令
     parts = ["curl 'https://weread.qq.com/web/book/read'"]
@@ -286,11 +296,34 @@ def fetch_read_stats():
         return None
 
 
+def validate_credentials():
+    """启动前快速校验：抓包命令是否真的解析出了登录 cookie
+
+    老逻辑在 cookie 解析失败时会静默退回模板占位 cookie，然后先随机休眠
+    0~45 分钟、再以"登录失效"失败，排查成本很高；这里提前失败并推送原因。
+    """
+    if not curl_str:
+        return
+    missing = [key for key in ('wr_vid', 'wr_skey') if not cookies.get(key)]
+    if missing:
+        message = (
+            f"WXREAD_CURL_BASH 解析失败：缺少 cookie 字段 {', '.join(missing)}。\n"
+            "请重新复制 /web/book/read 请求的完整 cURL (bash)，确保包含 cookie 头。"
+        )
+        logging.error(message)
+        push(message, PUSH_METHOD, is_success=False)
+        raise RuntimeError("抓包命令无效：未解析到登录 cookie")
+
+
 # ---------------------------------------------------------------------------
 # 阅读会话主循环
 # ---------------------------------------------------------------------------
 def run_session(refresh_print):
-    """执行一次完整阅读会话，返回成功上报次数
+    """执行一次完整阅读会话
+
+    返回 (成功上报次数, 服务端累计计入秒数, 实际耗时秒数)。
+    计入秒数为各次上报 rt 之和——服务端正是按 rt 累计阅读时长，
+    比"次数 × 30 秒"更接近真实结果（睡眠已随机化为 25~45 秒）。
 
     P1-1：会话启动时从 READ_POOL 随机选择一个“书页”元组，
     b/c/ci/sm/co/pr 全部来自同一次真实抓包，字段互相一致；
@@ -306,6 +339,8 @@ def run_session(refresh_print):
         session['bookId'], session['ci'], session['co'],
     )
     progress = 0
+    credited_seconds = 0
+    session_start = time.time()
 
     index = 1
     lastTime = int(time.time()) - 30
@@ -313,6 +348,12 @@ def run_session(refresh_print):
     consecutive_failures = 0
 
     while index <= read_num:
+        if time.time() - session_start > MAX_SESSION_SECONDS:
+            logging.warning(
+                "本次会话已超过 %d 分钟上限，提前结束（防止 CI 任务超时）。",
+                MAX_SESSION_SECONDS // 60,
+            )
+            break
         data.pop('s', None)
         # P1-1：字段一致性——全部来自同一抓包元组，co/pr 随进度推进
         data['b'] = session['b']
@@ -323,13 +364,15 @@ def run_session(refresh_print):
         data['pr'] = session['pr'] + progress // PROGRESS_PER_PR
         thisTime = int(time.time())
         data['ct'] = thisTime
-        data['rt'] = min(thisTime - lastTime, MAX_RT_SECONDS)
+        data['rt'] = max(1, min(thisTime - lastTime, MAX_RT_SECONDS))  # 防系统时钟回拨导致负值
         data['ts'] = int(thisTime * 1000) + random.randint(0, 1000)
         data['rn'] = random.randint(0, 1000)
         data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
         data['s'] = cal_hash(encode_data(data))
 
-        refresh_print(f"阅读进度: 第 {index}/{read_num} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
+        refresh_print(
+            f"阅读进度: 第 {index}/{read_num} 次上报中（已计入 {credited_seconds / 60:.1f} 分钟）"
+        )
         logging.debug("data: %s", data)
         try:
             response = http_post(
@@ -377,6 +420,8 @@ def run_session(refresh_print):
                 consecutive_failures = 0
                 lastTime = thisTime
                 index += 1
+                # 服务端按 rt 累计时长，这里同步累加用于推送真实口径
+                credited_seconds += data['rt']
                 # P1-1：会话内进度推进（有上限，避免超出章节范围）
                 progress = min(
                     progress + random.randint(PROGRESS_MIN_CHARS, PROGRESS_MAX_CHARS),
@@ -384,7 +429,9 @@ def run_session(refresh_print):
                 )
                 # P0-3：阅读间隔随机化（真实翻页间隔为长尾分布而非恒定 30 秒）
                 time.sleep(random.uniform(SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS))
-                refresh_print(f"阅读进度: 第 {min(index, read_num + 1) - 1}/{read_num} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
+                refresh_print(
+                    f"阅读进度: 第 {index - 1}/{read_num} 次，已计入 {credited_seconds / 60:.1f} 分钟"
+                )
             else:
                 synckey_repair_attempts += 1
                 if synckey_repair_attempts > SYNCKEY_REPAIR_LIMIT:
@@ -433,7 +480,7 @@ def run_session(refresh_print):
             # P1-3：鉴权刷新成功后退避，避免刷新后立即密集请求
             time.sleep(random.uniform(BACKOFF_MIN_SECONDS, BACKOFF_MAX_SECONDS))
 
-    return index - 1
+    return index - 1, credited_seconds, int(time.time() - session_start)
 
 
 def main():
@@ -446,6 +493,13 @@ def main():
             "HTTP 后端：requests（未安装 curl_cffi，TLS 指纹为 Python 默认特征，"
             "建议 pip install curl_cffi 以启用浏览器指纹模拟）"
         )
+
+    # 先校验抓包配置，避免无效 cookie 白等一轮启动抖动
+    validate_credentials()
+
+    placeholder_books = [e['bookId'] for e in READ_POOL if str(e.get('bookId', '')).startswith('TODO')]
+    if placeholder_books:
+        logging.warning("READ_POOL 中存在未补全的 bookId 占位符：%s（synckey 修复会失败）", placeholder_books)
 
     # P0-4：启动随机抖动（START_JITTER_MAX=0 可禁用）
     if START_JITTER_MAX > 0:
@@ -460,14 +514,21 @@ def main():
     refresh_cookie(strict=False)
 
     try:
-        completed = run_session(refresh_print)
-        logging.info("阅读脚本已完成。")
+        completed, credited_seconds, elapsed_seconds = run_session(refresh_print)
+        logging.info(
+            "阅读脚本已完成：成功上报 %d 次，服务端计入约 %.1f 分钟，实际耗时 %.1f 分钟。",
+            completed, credited_seconds / 60, elapsed_seconds / 60,
+        )
 
         stats_seconds = fetch_read_stats()
 
         if PUSH_METHOD not in (None, ''):
             logging.info("开始推送...")
-            message = f"微信读书自动阅读完成。\n阅读时长：{completed * 0.5} 分钟。"
+            message = (
+                f"微信读书自动阅读完成。\n"
+                f"上报 {completed} 次，计入约 {credited_seconds / 60:.1f} 分钟"
+                f"（实际耗时 {elapsed_seconds / 60:.1f} 分钟）。"
+            )
             if stats_seconds is not None:
                 message += f"\n今日实际计入约 {stats_seconds // 60} 分钟（官方统计接口，供核对）。"
             push(message, PUSH_METHOD, is_success=True)

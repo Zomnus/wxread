@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import time
+import urllib.parse
 
 import requests
 
@@ -16,6 +17,10 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+PUSH_ATTEMPTS = 3                      # 单个渠道最多尝试次数
+PUSH_RETRY_MIN_SECONDS = 5             # 重试退避下限
+PUSH_RETRY_MAX_SECONDS = 15            # 重试退避上限
+
 
 class PushNotification:
     def __init__(self):
@@ -24,13 +29,18 @@ class PushNotification:
         self.server_chan_url = "https://sctapi.ftqq.com/{}.send"
         self.wxpusher_simple_url = "https://wxpusher.zjiecode.com/api/send/message/{}/{}"
         self.headers = {"Content-Type": "application/json"}
+        # 同时兼容小写与大写代理环境变量（Actions 里常写成 HTTPS_PROXY）
         self.proxies = {
-            "http": os.getenv("http_proxy"),
-            "https": os.getenv("https_proxy"),
+            key: value
+            for key, value in {
+                "http": os.getenv("http_proxy") or os.getenv("HTTP_PROXY"),
+                "https": os.getenv("https_proxy") or os.getenv("HTTPS_PROXY"),
+            }.items()
+            if value
         }
 
     def push_pushplus(self, content, token, is_success):
-        attempts = 5
+        attempts = PUSH_ATTEMPTS
         title = f"微信阅读-{'成功' if is_success else '失败'}"
         for attempt in range(attempts):
             try:
@@ -43,7 +53,7 @@ class PushNotification:
             except requests.exceptions.RequestException as exc:
                 logger.error("PushPlus 推送失败: %s", exc)
                 if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
+                    sleep_time = random.randint(PUSH_RETRY_MIN_SECONDS, PUSH_RETRY_MAX_SECONDS)
                     logger.info("%d 秒后重试...", sleep_time)
                     time.sleep(sleep_time)
         return False
@@ -68,8 +78,11 @@ class PushNotification:
                 return False
 
     def push_wxpusher(self, content, spt):
-        attempts = 5
-        url = self.wxpusher_simple_url.format(spt, content)
+        attempts = PUSH_ATTEMPTS
+        # content 直接拼进 URL 路径，必须整体百分号编码：
+        # 否则内容中的换行、#、/ 会截断或破坏请求（# 之后的内容根本不会发送）
+        safe_content = urllib.parse.quote(str(content), safe='')
+        url = self.wxpusher_simple_url.format(spt, safe_content)
 
         for attempt in range(attempts):
             try:
@@ -80,13 +93,13 @@ class PushNotification:
             except requests.exceptions.RequestException as exc:
                 logger.error("WxPusher 推送失败: %s", exc)
                 if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
+                    sleep_time = random.randint(PUSH_RETRY_MIN_SECONDS, PUSH_RETRY_MAX_SECONDS)
                     logger.info("%d 秒后重试...", sleep_time)
                     time.sleep(sleep_time)
         return False
 
     def push_serverChan(self, content, spt, is_success):
-        attempts = 5
+        attempts = PUSH_ATTEMPTS
         url = self.server_chan_url.format(spt)
 
         title = f"微信阅读-{'成功' if is_success else '失败'}"
@@ -105,7 +118,7 @@ class PushNotification:
             except requests.exceptions.RequestException as exc:
                 logger.error("ServerChan 推送失败: %s", exc)
                 if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
+                    sleep_time = random.randint(PUSH_RETRY_MIN_SECONDS, PUSH_RETRY_MAX_SECONDS)
                     logger.info("%d 秒后重试...", sleep_time)
                     time.sleep(sleep_time)
         return False

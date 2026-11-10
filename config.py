@@ -2,6 +2,7 @@
 import os
 import re
 import shlex
+import sys
 import uuid
 
 """
@@ -9,17 +10,29 @@ import uuid
 默认使用本地值如果不存在从环境变量中获取值
 """
 
+
+def _env_int(name, default, minimum=0):
+    """读取整数环境变量：空值/非法值回退默认值，而不是直接抛 ValueError 让任务崩掉"""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == '':
+        return default
+    try:
+        return max(minimum, int(str(raw).strip()))
+    except ValueError:
+        print(f"[config] 环境变量 {name}={raw!r} 不是合法整数，已回退默认值 {default}", file=sys.stderr)
+        return default
+
+
 # 阅读次数 默认40次/20分钟
-READ_NUM = int(os.getenv('READ_NUM') or 40)
+READ_NUM = _env_int('READ_NUM', 40, minimum=1)
 
 # 启动随机抖动上限（秒，反检测改造 P0-4）
 # 定时触发后先随机休眠 0~该值秒，避免每天在固定分钟级时刻运行
 # 默认 2700（45 分钟）；本地手动测试可设为 0 禁用
-_start_jitter = os.getenv('START_JITTER_MAX')
-START_JITTER_MAX = int(_start_jitter) if _start_jitter not in (None, '') else 2700
+START_JITTER_MAX = _env_int('START_JITTER_MAX', 2700)
 
 # cookie 导出路径（P1-4：运行结束把内存中最新的 cookie 导出为 curl_bash 格式文件）
-# Actions 形态可配 PAT 后用 gh secret set 回写；本地/Docker 形态直接复用该文件
+# GitHub Actions 形态可配 PAT 后用 gh secret set 回写；本地运行直接复用该文件
 # 设为空字符串可禁用导出
 _cookie_export = os.getenv('WXREAD_COOKIE_EXPORT_PATH')
 COOKIE_EXPORT_PATH = _cookie_export if _cookie_export is not None else 'latest_cookie.txt'
@@ -40,10 +53,10 @@ WXPUSHER_SPT = "" or os.getenv("WXPUSHER_SPT")
 SERVERCHAN_SPT = "" or os.getenv("SERVERCHAN_SPT")
 
 
-# read接口的bash命令，本地部署时可对应替换headers、cookies
+# read接口的bash命令（必填，GitHub Actions 中由 secret WXREAD_CURL_BASH 注入）
 curl_str = os.getenv('WXREAD_CURL_BASH')
 
-# headers、cookies是一个省略模版，本地或者docker部署时对应替换
+# headers、cookies 是省略模板；提供了 WXREAD_CURL_BASH 时会被抓包内容整体覆盖
 cookies = {
     'RK': 'oxEY1bTnXf',
     'ptcz': '53e3b35a9486dd63c4d06430b05aa169402117fc407dc5cc9329b41e59f62e2b',

@@ -3,7 +3,13 @@ import sys
 
 
 def setup_logging(width=120):
+    """初始化日志，返回进度刷新函数
+
+    - 终端（TTY）：进度用 \r 原地覆盖，保持单行
+    - 非终端（GitHub Actions 等 CI）：逐行输出，避免日志里出现一长串覆盖内容
+    """
     active = False
+    is_tty = sys.stdout.isatty()
 
     def clear():
         nonlocal active
@@ -14,6 +20,9 @@ def setup_logging(width=120):
 
     def refresh_print(message):
         nonlocal active
+        if not is_tty:
+            print(message, flush=True)
+            return
         active = True
         print(f"\r{message:<{width}}", end="", flush=True)
 
