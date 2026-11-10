@@ -52,7 +52,8 @@ jobs:
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
         READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
         # 启动随机抖动上限（秒）：触发后随机休眠 0-45 分钟，避免固定分钟级时刻运行
-        START_JITTER_MAX: "2700"
+        # 可在 Repository Variables 中配置 START_JITTER_MAX 覆盖（设 0 禁用）
+        START_JITTER_MAX: ${{ vars.START_JITTER_MAX || '2700' }}
         # 可选：官方 Agent Gateway API Key（wrk- 开头），配置后推送"今日实际计入时长"
         WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
 
