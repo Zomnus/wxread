@@ -19,7 +19,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-22.04
-    environment: AutoRead  # 指定环境
+    environment: AutoRead  # 指定环境（不存在时 GitHub 会自动创建）
+    # 兜底超时：会话上限 3 小时 + 启动抖动 45 分钟，正常远小于该值
+    timeout-minutes: 240
 
     steps:
 
@@ -39,7 +41,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3 "curl_cffi>=0.7.0"
+        pip install -r requirements.txt
 
     - name: Run deployment script
       env:

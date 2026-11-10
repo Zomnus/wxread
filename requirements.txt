@@ -1,0 +1,4 @@
+# 运行依赖（GitHub Actions 与本地运行共用）
+requests>=2.32.3
+# 反检测 P0-1：模拟 Chrome 的 TLS/HTTP2 指纹；未安装时 main.py 自动回退 requests
+curl_cffi>=0.7.0
