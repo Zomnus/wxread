@@ -6,12 +6,49 @@
 
 该脚本具备以下功能：
 
-- **阅读时长调节**：默认计入排行榜和挑战赛，时长可调节，默认为60分钟。
+- **阅读时长调节**：默认计入排行榜和挑战赛，时长可调节，默认为 20 分钟（`READ_NUM=40`，每次 30 秒）。
 - **定时运行推送**：可部署在GitHub Action/服务器上，支持每天定时运行并推送结果到微信。
 - **Cookie自动更新**：脚本能自动获取并更新Cookie，一次部署后面无需其它操作。
 - **轻量化设计**：本脚本实现了轻量化的编写，部署服务器/GIthub action后到点运行，无需额外硬件。
+- **反检测增强**：TLS/HTTP2 指纹模拟（curl_cffi）、sentry trace 随机化、阅读行为随机化、启动随机抖动，详见下方【反检测增强】章节。
+- **P1 增强**：阅读内容元组一致性（书/章/摘要字段匹配）、失败退避重试、真实计入时长校验（可选）、cookie 自动导出与 Actions 回写，详见【P1 增强】章节。
 
 ***
+
+## 反检测增强 🛡️
+
+在原版基础上完成 P0 级反检测改造，收敛可被服务端风控识别的指纹面：
+
+| 改造项 | 说明 | 生效方式 |
+| --- | --- | --- |
+| TLS/HTTP2 指纹模拟 | 优先使用 `curl_cffi` 模拟 Chrome 的 TLS 握手与 HTTP/2 特征，消除 Python requests 的 JA3 指纹；未安装时自动回退到 requests（功能等价但指纹暴露） | 安装 `curl_cffi` 即生效（Docker 镜像 / Actions 已内置） |
+| sentry trace 随机化 | 每次运行随机生成新的 `sentry-trace_id`，不再复用抓包时的固定值（真实浏览器每次会话都会生成新值） | 自动生效 |
+| 阅读行为随机化 | 阅读间隔 25–45 秒随机、`rt` 字段上限 90 秒（吸收异常耗时）、阅读次数每日 ±10% 抖动 | 自动生效 |
+| 启动随机抖动 | 定时触发后先随机休眠 0–45 分钟，避免每天在固定分钟级时刻运行 | 环境变量 `START_JITTER_MAX`（默认 2700，设 0 禁用） |
+
+> 本地手动测试建议：`START_JITTER_MAX=0 python main.py`，跳过启动抖动立即执行。
+> 反检测不等于零风险，建议阅读时长控制在每天 10–30 分钟的自然区间。
+
+## P1 增强 🧩
+
+| 增强项 | 说明 | 配置 |
+| --- | --- | --- |
+| 阅读内容一致性（READ_POOL） | 每次会话从 `READ_POOL` 随机选一本"书页"元组：`b/c/ci/co/sm/pr` 全部来自同一次真实抓包，字段互相匹配（原版随机换书但摘要恒为三体，存在交叉校验漏洞）；会话内 `co/pr` 随进度缓慢推进模拟翻页 | config.py 中补充抓包条目 |
+| 失败退避重试 | 请求失败/返回异常时退避 30–60 秒重试，连续失败 5 次才终止（原版单次失败即终止，Actions 网络抖动易误杀）；synckey 修复的 bookId 跟随当前会话书籍 | 自动生效 |
+| 真实计入时长校验（可选） | 运行结束查询官方 Agent Gateway 的阅读统计，推送"今日实际计入约 X 分钟"，**第一时间发现时长被风控折扣** | secrets 添加 `WEREAD_API_KEY`（wrk- 开头，[weread.qq.com/r/weread-skills](https://weread.qq.com/r/weread-skills) 免费获取） |
+| cookie 导出与回写 | 运行结束（无论成败）把续期后的最新 cookie 导出到 `latest_cookie.txt`；Actions 配置 `PAT_TOKEN` 后自动回写 `WXREAD_CURL_BASH` secret，延长免重新抓包周期 | `PAT_TOKEN`（需 repo 权限的 PAT，可选）；本地/ Docker 直接复用导出文件 |
+
+**补充 READ_POOL 条目**：在网页版真实阅读时抓几条 `read` 请求，用工具一键转换并追加：
+
+```bash
+# 抓包保存到 capture.txt 后（bookId 为书籍详情页 URL 末段数字，如 3300060341）
+python3 tools/capture_to_pool.py capture.txt --book-id 3300060341 --append
+# 或直接从剪贴板：pbpaste | python3 tools/capture_to_pool.py --book-id 3300060341 --append
+```
+
+也可以手动按 `config.py` 中现有格式添加。条目越多（多本书），会话分布越接近真实阅读。
+
+**单元测试**：`python3 -m unittest discover -s tests -v`（23 个用例，覆盖签名回归、curl 解析、cookie 导出闭环、随机化边界等）。
 ## 操作步骤 🛠️
 
 ### 抓包准备
@@ -50,6 +87,9 @@
 | `WXPUSHER_SPT`             | WxPusher 的token                    | 当 `PUSH_METHOD=wxpusher` 时必填，[获取地址](https://wxpusher.zjiecode.com/docs/#/?id=获取spt) | secrets   |
 | `TELEGRAM_BOT_TOKEN`  <br>`TELEGRAM_CHAT_ID`   <br>`http_proxy`/`https_proxy`（可选）| 群组id以及机器人token                 | 当 `PUSH_METHOD=telegram` 时必填，[配置文档](https://www.nodeseek.com/post-22475-1) | secrets   |
 | `SERVERCHAN_SPT`          | serverchan 的 SendKey               | 当 `PUSH_METHOD=serverchan` 时必填，[获取地址](https://sct.ftqq.com/sendkey) | secrets   |
+| `START_JITTER_MAX`        | 启动随机抖动上限（秒）              | **可选**，默认 2700（45 分钟）；设 0 禁用（如需固定时刻）                   | variables |
+| `WEREAD_API_KEY`          | 官方 Agent Gateway Key（wrk- 开头） | **可选**，配置后推送"今日实际计入时长"，[获取地址](https://weread.qq.com/r/weread-skills) | secrets |
+| `PAT_TOKEN`               | GitHub PAT（repo 权限）             | **可选**，配置后每次运行结束自动把最新 cookie 回写 `WXREAD_CURL_BASH`，延长免抓包周期 | secrets |
 
 **重要：除了READ_NUM配置在varables，其它的都配置在secrets里面的；需要推送`PUSH_METHOD`是必填的。**
 
@@ -71,9 +111,12 @@ services:
 
     environment:
       TZ: "Asia/Shanghai"
-      
+
       # 阅读次数（每次 30 秒），默认40为20分钟
       READ_NUM: 40
+
+      # 启动随机抖动上限（秒）：触发后随机休眠 0~该值秒，避免固定时刻运行；手动测试设为 0
+      START_JITTER_MAX: 2700
       
       # 微信读书 curl bash 命令（必需）
       # 使用 | 表示多行字符串，下一行开始粘贴完整的 curl 命令
@@ -127,13 +170,15 @@ docker-compose exec wxread python /app/main.py
 ***
 ## Attention 📢
 
-1. **签到次数调整**：只需签到完成挑战赛可以将`num`次数从120调整为2，每次`num`为30秒，200即100分钟。
-   
-2. **解决阅读时间问题**：对于issue中提出的“阅读时间没有增加”，“增加时间与刷的时间不对等”建议保留`config.py`中的【data】字段，默认阅读三体，其它书籍自行测试。
+1. **阅读次数调整**：`READ_NUM` 每次为 30 秒，默认 40（20 分钟）。只需完成挑战赛每日阅读可设为 2（约 1 分钟）；需要 60 分钟设 120。
 
-3. **GitHub Action部署/本地部署**：主要配置config.py即可，Action部署使用环境变量，本地部署修改config.py里的阅读次数、headers、cookies即可。
+2. **解决阅读时间问题**：若遇到 issue 中反馈的“阅读时间没有增加”、“增加时间与刷的时间不对等”，建议配置 `WEREAD_API_KEY`（见 P1 增强）核对实际计入时长；`READ_POOL` 默认读三体，其它书籍用 `tools/capture_to_pool.py` 转换抓包后自行测试。
+
+3. **GitHub Action部署/本地部署**：主要配置config.py即可，Action部署使用环境变量，本地部署修改config.py里的阅读次数、READ_POOL、headers、cookies即可。
 
 4. **推送**：pushplus推送偶尔出问题，猜测是GitHub action环境问题，增加重试机制。并增加wxpusher的极简推送方式。
+
+5. **反检测依赖**：`pip install curl_cffi` 后自动启用 Chrome TLS/HTTP2 指纹模拟（Docker/Actions 已内置）；未安装时自动回退到 requests，功能不受影响。手动测试用 `START_JITTER_MAX=0 python main.py` 跳过启动抖动。
 
 
 ***

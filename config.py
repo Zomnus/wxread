@@ -1,6 +1,8 @@
 # config.py 自定义配置,包括阅读次数、推送token的填写
 import os
 import re
+import shlex
+import uuid
 
 """
 可修改区域
@@ -9,6 +11,22 @@ import re
 
 # 阅读次数 默认40次/20分钟
 READ_NUM = int(os.getenv('READ_NUM') or 40)
+
+# 启动随机抖动上限（秒，反检测改造 P0-4）
+# 定时触发后先随机休眠 0~该值秒，避免每天在固定分钟级时刻运行
+# 默认 2700（45 分钟）；本地手动测试可设为 0 禁用
+_start_jitter = os.getenv('START_JITTER_MAX')
+START_JITTER_MAX = int(_start_jitter) if _start_jitter not in (None, '') else 2700
+
+# cookie 导出路径（P1-4：运行结束把内存中最新的 cookie 导出为 curl_bash 格式文件）
+# Actions 形态可配 PAT 后用 gh secret set 回写；本地/Docker 形态直接复用该文件
+# 设为空字符串可禁用导出
+_cookie_export = os.getenv('WXREAD_COOKIE_EXPORT_PATH')
+COOKIE_EXPORT_PATH = _cookie_export if _cookie_export is not None else 'latest_cookie.txt'
+
+# 微信读书官方 Agent Gateway API Key（P1-2：运行后校验真实计入时长，可选）
+# wrk- 开头，https://weread.qq.com/r/weread-skills 免费获取；不配置则跳过校验
+WEREAD_API_KEY = os.getenv('WEREAD_API_KEY') or ''
 # 需要推送时可选，可选pushplus、wxpusher、telegram
 PUSH_METHOD = "" or os.getenv('PUSH_METHOD')
 # pushplus推送时需填
@@ -44,19 +62,20 @@ headers = {
 }
 
 
-# 书籍
-book = [
-    "36d322f07186022636daa5e","6f932ec05dd9eb6f96f14b9","43f3229071984b9343f04a4","d7732ea0813ab7d58g0184b8",
-    "3d03298058a9443d052d409","4fc328a0729350754fc56d4","a743220058a92aa746632c0","140329d0716ce81f140468e",
-    "1d9321c0718ff5e11d9afe8","ff132750727dc0f6ff1f7b5","e8532a40719c4eb7e851cbe","9b13257072562b5c9b1c8d6"
-]
-
-# 章节
-chapter = [
-    "ecc32f3013eccbc87e4b62e","a87322c014a87ff679a21ea","e4d32d5015e4da3b7fbb1fa","16732dc0161679091c5aeb1",
-    "8f132430178f14e45fce0f7","c9f326d018c9f0f895fb5e4","45c322601945c48cce2e120","d3d322001ad3d9446802347",
-    "65132ca01b6512bd43d90e3","c20321001cc20ad4d76f5ae","c51323901dc51ce410c121b","aab325601eaab3238922e53",
-    "9bf32f301f9bf31c7ff0a60","c7432af0210c74d97b01b1c","70e32fb021170efdf2eca12","6f4322302126f4922f45dec"
+# 阅读内容池（P1-1：书籍/章节字段一致性元组）
+# 每个元素对应一次真实抓包的“页面”：b/c/ci/co/sm/pr/bookId 来自同一次请求，字段互相匹配，
+# 会话启动时随机选择一本书，会话内 co/pr 随进度缓慢推进（模拟真实翻页）。
+# 建议在网页版真实阅读时抓 5-10 条 read 请求，按此格式补充更多条目：
+READ_POOL = [
+    {
+        "b": "ce032b305a9bc1ce0b0dd2a",          # 书籍 ID（三体）
+        "bookId": "3300060341",                   # 同一本书的数字 bookId（用于 chapterInfos 修复）
+        "c": "7f632b502707f6ffaa6bf2e",          # 章节/内容块 ID
+        "ci": 27,                                  # 章节索引
+        "co": 389,                                 # 内容起始位置
+        "sm": "19聚会《三体》网友的聚会地点是一处僻静",  # 当前页内容摘要
+        "pr": 74,                                  # 页码/段落索引
+    },
 ]
 
 """
@@ -81,38 +100,99 @@ data = {
 }
 
 
-def convert(curl_command):
-    """提取bash接口中的headers与cookies
-    支持 -H 'Cookie: xxx' 和 -b 'xxx' 两种方式的cookie提取
-    """
-    # 提取 headers
-    headers_temp = {}
-    for match in re.findall(r"-H '([^:]+): ([^']+)'", curl_command):
-        headers_temp[match[0]] = match[1]
-
-    # 提取 cookies
-    cookies = {}
-    
-    # 从 -H 'Cookie: xxx' 提取
-    cookie_header = next((v for k, v in headers_temp.items() 
-                         if k.lower() == 'cookie'), '')
-    
-    # 从 -b 'xxx' 提取
-    cookie_b = re.search(r"-b '([^']+)'", curl_command)
-    cookie_string = cookie_b.group(1) if cookie_b else cookie_header
-    
-    # 解析 cookie 字符串
+def _parse_cookie_string(cookie_string, cookies):
+    """解析 cookie 字符串到 dict"""
     if cookie_string:
-        for cookie in cookie_string.split('; '):
+        for cookie in re.split(r';\s*', cookie_string):
             if '=' in cookie:
                 key, value = cookie.split('=', 1)
                 cookies[key.strip()] = value.strip()
-    
-    # 移除 headers 中的 Cookie/cookie
-    headers = {k: v for k, v in headers_temp.items() 
-              if k.lower() != 'cookie'}
 
+
+def _extract_by_shlex(curl_command):
+    """shlex 分词解析（P2-3）：兼容单引号/双引号/ANSI-C 引号三种 curl 复制格式
+
+    返回 (headers, cookie_b)；-b / --cookie 的 cookie 优先级高于 -H 'cookie: ...'
+    """
+    try:
+        tokens = shlex.split(curl_command, posix=True)
+    except ValueError:
+        return None, ''
+
+    # 兼容 ANSI-C 引号 $'...'：shlex 分词后 $ 会残留在 token 开头，统一剥离
+    tokens = [t[1:] if t.startswith('$') else t for t in tokens]
+
+    headers = {}
+    cookie_b = ''
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in ('-H', '--header') and i + 1 < len(tokens):
+            raw = tokens[i + 1]
+            if ':' in raw:
+                key, value = raw.split(':', 1)
+                headers[key.strip()] = value.strip()
+            i += 2
+            continue
+        if token in ('-b', '--cookie') and i + 1 < len(tokens):
+            cookie_b = tokens[i + 1]
+            i += 2
+            continue
+        i += 1
+    return headers, cookie_b
+
+
+def _extract_by_regex(curl_command):
+    """正则兜底（shlex 失败时使用，仅支持单引号格式）"""
+    headers = {}
+    for match in re.findall(r"-H '([^:]+): ([^']+)'", curl_command):
+        headers[match[0]] = match[1]
+    cookie_b = re.search(r"-b '([^']+)'", curl_command)
+    return headers, cookie_b.group(1) if cookie_b else ''
+
+
+def convert(curl_command):
+    """提取 curl 命令中的 headers 与 cookies（P2-3：shlex 健壮化）
+
+    优先 shlex 分词，兼容：
+    - bash 单引号（macOS/Linux DevTools "Copy as cURL (bash)"）
+    - Windows 双引号（"Copy as cURL (cmd)"）
+    - ANSI-C 引号 $'...'（新版 Chrome / Git Bash）
+    以及 "name:value" 无空格写法；cookie 支持 -H 'Cookie: xxx' 与 -b 'xxx'
+    两种途径（-b 优先）。shlex 解析失败时退回原正则方案。
+    """
+    headers, cookie_b = _extract_by_shlex(curl_command)
+    if not headers:
+        headers, cookie_b = _extract_by_regex(curl_command)
+
+    cookie_header = next((v for k, v in headers.items() if k.lower() == 'cookie'), '')
+    cookie_string = cookie_b or cookie_header
+
+    cookies = {}
+    _parse_cookie_string(cookie_string, cookies)
+
+    # 移除 headers 中的 Cookie/cookie
+    headers = {k: v for k, v in headers.items() if k.lower() != 'cookie'}
     return headers, cookies
 
 
-headers, cookies = convert(curl_str) if curl_str else (headers, cookies)
+def randomize_sentry_trace(headers):
+    """随机化 baggage 头中的 sentry-trace_id（反检测改造 P0-2）
+
+    真实浏览器每次页面加载都会生成新的 sentry trace_id，
+    而抓包复用的 headers 中该值恒定不变，属于明显的非浏览器指纹。
+    每次进程启动时调用一次（对应一次"页面会话"）。
+    """
+    baggage_key = next((k for k in headers if k.lower() == 'baggage'), None)
+    if baggage_key:
+        headers[baggage_key] = re.sub(
+            r'sentry-trace_id=[0-9a-f]+',
+            f'sentry-trace_id={uuid.uuid4().hex}',
+            headers[baggage_key],
+        )
+    return headers
+
+
+if curl_str:
+    headers, cookies = convert(curl_str)
+headers = randomize_sentry_trace(headers)

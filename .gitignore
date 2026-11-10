@@ -10,3 +10,11 @@ logs/
 .env
 .env.local
 .env.*.local
+
+# Cookie export (P1-4: 运行时导出的最新 cookie，严禁提交)
+latest_cookie.txt
+latest_cookie*
+
+# WorkBuddy 本地工作数据（会话记忆，不入库）
+.workbuddy/
+__pycache__/

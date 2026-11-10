@@ -13,14 +13,14 @@ ENV PATH="/usr/local/bin:${PATH}"
 COPY main.py push.py config.py log_utils.py scheduler.py ./
 
 # 安装 Python 依赖
+# curl_cffi：模拟 Chrome TLS/HTTP2 指纹（反检测 P0-1），main.py 会在未安装时自动回退
 RUN python -m pip install --no-cache-dir \
     'requests>=2.32.3' \
-    'urllib3>=2.2.3'
+    'urllib3>=2.2.3' \
+    'curl_cffi>=0.7.0'
 
-# 创建 cron 任务（每天凌晨1点执行）
-RUN echo "0 1 * * * cd /app && /usr/local/bin/python3 main.py >> /app/logs/\$(date +\%Y-\%m-\%d).log 2>&1" > /etc/cron.d/wxread-cron
-RUN chmod 0644 /etc/cron.d/wxread-cron
-RUN crontab /etc/cron.d/wxread-cron
+# 定时调度统一由 scheduler.py（APScheduler，CRON_SCHEDULE 环境变量）负责，
+# 无需系统 cron（原 cron.d 双轨代码从未生效，已移除）
 
 # 启动命令
 CMD ["python", "scheduler.py"]

@@ -10,6 +10,18 @@ services:
       # 阅读次数（每次 30 秒），默认40为20分钟
       READ_NUM: 40
 
+      # 启动随机抖动上限（秒）：定时触发后随机休眠 0~该值秒，
+      # 避免每天在固定分钟级时刻运行；手动测试可设为 0
+      START_JITTER_MAX: 2700
+
+      # 可选：官方 Agent Gateway API Key（wrk- 开头），
+      # 配置后推送"今日实际计入时长"，用于核对时长是否被服务端计入
+      WEREAD_API_KEY: ""
+
+      # cookie 导出路径（容器内路径；如需跨容器重启保留，可挂载卷），
+      # 设为空字符串可禁用导出
+      WXREAD_COOKIE_EXPORT_PATH: /app/latest_cookie.txt
+
       # 微信读书 curl bash 命令（必需）
       # 使用 | 表示多行字符串，下一行开始粘贴完整的 curl 命令
       WXREAD_CURL_BASH: |
