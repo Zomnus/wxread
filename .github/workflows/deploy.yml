@@ -39,7 +39,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3 curl_cffi>=0.7.0
+        pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3 "curl_cffi>=0.7.0"
 
     - name: Run deployment script
       env:
@@ -64,11 +64,17 @@ jobs:
     # main.py 运行结束会把续期后的最新 cookie 导出到 latest_cookie.txt；
     # 配置了 PAT_TOKEN secret（需 repo 权限）时自动回写 WXREAD_CURL_BASH，
     # 延长免重新抓包的周期。注意：默认 GITHUB_TOKEN 无权修改 secrets，必须自建 PAT。
+    # 注意：secrets 上下文不能用于 if 表达式（workflow 校验会报
+    # Unrecognized named-value），因此这里用 always() + 脚本内判断 token 是否为空。
     - name: Persist refreshed cookie
-      if: ${{ always() && secrets.PAT_TOKEN != '' }}
+      if: ${{ always() }}
       env:
         GH_TOKEN: ${{ secrets.PAT_TOKEN }}
       run: |
+        if [ -z "$GH_TOKEN" ]; then
+          echo "未配置 PAT_TOKEN，跳过 cookie 回写。"
+          exit 0
+        fi
         if [ -f latest_cookie.txt ]; then
           gh secret set WXREAD_CURL_BASH < latest_cookie.txt
           echo "WXREAD_CURL_BASH secret 已用最新 cookie 更新。"
