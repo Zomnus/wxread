@@ -8,7 +8,7 @@
 
 ## 功能特性 ✨
 
-- **阅读时长调节**：默认计入排行榜和挑战赛，时长可调，默认 20 分钟（`READ_NUM=40`，每次约 30 秒）。
+- **阅读时长调节**：默认计入排行榜和挑战赛，时长可调，默认 20 分钟（`READ_NUM=40`，每次间隔 25–45 秒随机）。
 - **定时运行与推送**：每天固定时刻触发，结果推送到微信（pushplus / wxpusher / Telegram / ServerChan 四选一）。
 - **Cookie 自动续期与回写**：运行时自动续期 `wr_skey`，结束后导出最新 cookie；配置 PAT 后可自动回写仓库 secret，**一次抓包长期免维护**。
 - **反检测增强（P0）**：Chrome TLS/HTTP2 指纹模拟、sentry trace 随机化、阅读行为随机化、启动随机抖动。
@@ -31,25 +31,29 @@
 
 | 增强项 | 说明 |
 | --- | --- |
-| 阅读内容一致性（READ_POOL） | 每次会话从 `READ_POOL` 随机选一个"书页"元组：`b/c/ci/co/sm/pr` 全部来自同一次真实抓包、字段互相匹配（原版随机换书但摘要恒为三体，存在交叉校验漏洞）；会话内 `co/pr` 随进度缓慢推进，模拟真实翻页 |
+| 阅读内容一致性（READ_POOL） | 每次会话从 `READ_POOL` 随机选一个"书页"元组：`b/c/ci/co/sm/pr` 全部来自同一条真实抓包、字段互相匹配（原版随机换书但摘要恒为三体，存在交叉校验漏洞）；会话内 `co/pr` 随进度缓慢推进，模拟真实翻页。池条目由抓包报文自动识别，见下方说明 |
 | 失败退避重试 | 请求失败/返回异常时退避 30–60 秒重试，连续失败 5 次才终止（原版单次失败即终止，网络抖动会误杀） |
 | 真实计入时长校验（可选） | 配置 `WEREAD_API_KEY`（`wrk-` 开头，[免费获取](https://weread.qq.com/r/weread-skills)）后，运行结束查询官方统计接口，推送「今日实际计入约 X 分钟」，**可用于发现时长被风控折扣** |
 | cookie 导出与回写 | 运行结束（无论成败）导出续期后的最新 cookie，供下次复用或自动回写 secret |
 | 快捷失败 | 抓包命令解析不到 `wr_skey` 时立即报错并推送原因，不再白等一轮启动抖动 |
 
-### 扩充 READ_POOL（多本书）
+### 阅读池（多本书）不用手工填字段
 
-在网页版真实阅读时抓几条 `read` 请求，用自带工具一键转换：
+`read` 请求的报文里本来就带着 `b/c/ci/co/sm/pr`，所以脚本会**自动把 `WXREAD_CURL_BASH` 里的这条请求解析成阅读池条目**（`bookId` 从 `referer` 的 `bookDetail` 链接推断）。抓包时读的哪本书，池里就是哪本书；默认的三体条目只在完全没有可用报文时兜底。
 
-```bash
-# 抓包保存到 capture.txt（bookId 为书籍详情页 URL 末段数字，如 3300060341）
-python3 tools/capture_to_pool.py capture.txt --book-id 3300060341 --append
+想加入更多书 / 更多页，只要**多抓几条 `read` 请求**：
 
-# 或直接从剪贴板（macOS）
-pbpaste | python3 tools/capture_to_pool.py --book-id 3300060341 --append
+```text
+curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":3,...}'
+
+curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":5,...}'
 ```
 
-省略 `--book-id` 时会尝试从 referer 的 `bookDetail/` 链接自动推断。条目越多（多本书），会话分布越接近真实阅读。
+- 用**空行隔开**粘贴进同一个 secret `WXREAD_CURL_BASH`，或分别放到 `WXREAD_CURL_BASH_2` … `_5`；
+- 运行日志会显示 `阅读池：N 条（由抓包报文自动识别，共 N 条抓包）`，据此确认生效；
+- 同一条抓包重复粘贴会自动去重。
+
+> 想把某几页写死进代码（而非放在 secret 里）时，仍可用旧工具：`python3 tools/capture_to_pool.py capture.txt --append`，条目会写入 `config.py` 的 `EXTRA_POOL`。
 
 ## 本地运行与测试 🧪
 
@@ -60,15 +64,15 @@ START_JITTER_MAX=0 python3 main.py          # 跳过启动抖动，立即执行�
 ```
 
 ```bash
-python3 -m unittest discover -s tests -v    # 52 个用例：签名回归/解析/导出/随机化/运行期行为
+python3 -m unittest discover -s tests -v    # 69 个用例：签名回归/解析/导出/随机化/运行期行为/阅读池识别
 ```
 
-也可以直接修改 `config.py` 里的 `READ_NUM`、`READ_POOL`、headers、cookies 后运行，或参考 `.env.example` 用环境变量注入。
+也可以直接修改 `config.py` 里的 `READ_NUM`、`EXTRA_POOL`、headers、cookies 后运行，或参考 `.env.example` 用环境变量注入。
 
 ## Attention 📢
 
-1. **阅读次数调整**：`READ_NUM` 每次约 30 秒，默认 40（20 分钟）；只完成每日挑战可设 2；需要 60 分钟设 120。
-2. **阅读时间没有增加**：先配 `WEREAD_API_KEY` 核对实际计入时长；`READ_POOL` 默认读三体，其它书籍请用 `capture_to_pool.py` 转换抓包后自测。
+1. **阅读次数调整**：`READ_NUM` 每次间隔 25–45 秒随机，默认 40（约 20 分钟）；只完成每日挑战可设 2；需要 60 分钟设 120。
+2. **阅读时间没有增加**：先配 `WEREAD_API_KEY` 核对实际计入时长；换书只需抓一条该书（或任意在读的书）的 `read` 请求，替换/追加到 `WXREAD_CURL_BASH`，脚本会自动识别，不需要手工填字段。
 3. **首次运行慢**：启动随机休眠 0–45 分钟属于设计行为，不是卡死。
 4. **推送**：pushplus 偶发不稳定，已内置短退避重试；wxpusher 为极简推送（内容整体 URL 编码，支持换行与特殊字符）。
 5. **反检测依赖**：安装 `curl_cffi` 后自动启用指纹模拟，未安装时回退 requests，功能不受影响。

@@ -1,4 +1,5 @@
 # config.py 自定义配置,包括阅读次数、推送token的填写
+import json
 import os
 import re
 import shlex
@@ -75,11 +76,11 @@ headers = {
 }
 
 
-# 阅读内容池（P1-1：书籍/章节字段一致性元组）
-# 每个元素对应一次真实抓包的“页面”：b/c/ci/co/sm/pr/bookId 来自同一次请求，字段互相匹配，
-# 会话启动时随机选择一本书，会话内 co/pr 随进度缓慢推进（模拟真实翻页）。
-# 建议在网页版真实阅读时抓 5-10 条 read 请求，按此格式补充更多条目：
-READ_POOL = [
+# 默认阅读池（兜底条目）
+# 每个元素是一次真实抓包的“页面”：b/c/ci/co/sm/pr 来自同一条 read 请求，字段互相匹配。
+# 通常不需要手工修改这里——脚本会自动从 WXREAD_CURL_BASH 的报文里解析出你抓包的书籍，
+# 混进阅读池（见文件末尾的“阅读池自动识别”）。这里的条目仅在没有可用抓包时兜底。
+DEFAULT_POOL = [
     {
         "b": "ce032b305a9bc1ce0b0dd2a",          # 书籍 ID（三体）
         "bookId": "3300060341",                   # 同一本书的数字 bookId（用于 chapterInfos 修复）
@@ -89,6 +90,11 @@ READ_POOL = [
         "sm": "19聚会《三体》网友的聚会地点是一处僻静",  # 当前页内容摘要
         "pr": 74,                                  # 页码/段落索引
     },
+]
+
+# 手工追加条目（可选）：正常情况下无需改动——抓包报文会被自动识别（见文件末尾）；
+# 若想固定写死某几页，用 tools/capture_to_pool.py --append 追加到这里即可，格式同上
+EXTRA_POOL = [
 ]
 
 """
@@ -122,37 +128,60 @@ def _parse_cookie_string(cookie_string, cookies):
                 cookies[key.strip()] = value.strip()
 
 
-def _extract_by_shlex(curl_command):
-    """shlex 分词解析（P2-3）：兼容单引号/双引号/ANSI-C 引号三种 curl 复制格式
+CURL_DATA_FLAGS = ('-d', '--data', '--data-raw', '--data-binary')
 
-    返回 (headers, cookie_b)；-b / --cookie 的 cookie 优先级高于 -H 'cookie: ...'
+
+def parse_curl_request(curl_command):
+    """把一条 curl 命令拆成 {headers, cookie, body}
+
+    兼容 bash 单引号、Windows 双引号 "Copy as cURL (cmd)"、
+    以及 ANSI-C 引号 $'...' 三种复制格式；不是 curl 命令或引号不配对时返回 None。
     """
+    if not curl_command or 'curl' not in curl_command:
+        return None
     try:
         tokens = shlex.split(curl_command, posix=True)
     except ValueError:
-        return None, ''
+        return None
 
     # 兼容 ANSI-C 引号 $'...'：shlex 分词后 $ 会残留在 token 开头，统一剥离
     tokens = [t[1:] if t.startswith('$') else t for t in tokens]
 
     headers = {}
-    cookie_b = ''
+    cookie = ''
+    body = ''
     i = 0
-    while i < len(tokens):
+    total = len(tokens)
+    while i < total:
         token = tokens[i]
-        if token in ('-H', '--header') and i + 1 < len(tokens):
+        if token in ('-H', '--header') and i + 1 < total:
             raw = tokens[i + 1]
             if ':' in raw:
                 key, value = raw.split(':', 1)
                 headers[key.strip()] = value.strip()
             i += 2
             continue
-        if token in ('-b', '--cookie') and i + 1 < len(tokens):
-            cookie_b = tokens[i + 1]
+        if token in ('-b', '--cookie') and i + 1 < total:
+            cookie = tokens[i + 1]
+            i += 2
+            continue
+        if token in CURL_DATA_FLAGS and i + 1 < total:
+            body = tokens[i + 1]
             i += 2
             continue
         i += 1
-    return headers, cookie_b
+    return {'headers': headers, 'cookie': cookie, 'body': body}
+
+
+def _extract_by_shlex(curl_command):
+    """shlex 分词解析（P2-3）：返回 (headers, cookie_b)
+
+    -b / --cookie 的 cookie 优先级高于 -H 'cookie: ...'；分词失败返回 (None, '')
+    """
+    info = parse_curl_request(curl_command)
+    if info is None:
+        return None, ''
+    return info['headers'], info['cookie']
 
 
 def _extract_by_regex(curl_command):
@@ -209,3 +238,83 @@ def randomize_sentry_trace(headers):
 if curl_str:
     headers, cookies = convert(curl_str)
 headers = randomize_sentry_trace(headers)
+
+
+# ---------------------------------------------------------------------------
+# 阅读池自动识别（扩充 READ_POOL 的最简方式）
+#
+# read 请求的报文里本来就带着 b/c/ci/co/sm/pr，所以不需要手工填字段、
+# 也不需要跑额外工具：你抓的那条 cURL 会被自动解析成阅读池条目。
+#
+# 想加入更多书 / 更多页 → 多抓几条 read 请求，用空行（或 #---- 分隔线）隔开，
+# 一起粘进同一个 secret WXREAD_CURL_BASH；也可以分别放在
+# WXREAD_CURL_BASH_2 / _3 / _4 / _5 里。条目越多，会话分布越接近真实阅读。
+# ---------------------------------------------------------------------------
+POOL_FIELDS = ('b', 'c', 'ci', 'co', 'sm', 'pr')
+CURL_SPLIT_RE = re.compile(r'\n\s*\n|^\s*#\s*[-=]{3,}.*$', re.M)
+
+
+def split_curls(text):
+    """把粘贴在一起的多个 curl 命令拆开（空行或 #---- 分隔线）"""
+    if not text:
+        return []
+    return [part.strip() for part in CURL_SPLIT_RE.split(text) if 'curl' in part]
+
+
+def _book_id_from_headers(headers):
+    """从 referer 的 bookDetail 链接推断数字 bookId（read 报文本身不含该字段）"""
+    referer = next((v for k, v in headers.items() if k.lower() == 'referer'), '')
+    match = re.search(r'bookDetail(?:%2F|/)(\d+)', referer, re.I)
+    return match.group(1) if match else ''
+
+
+def entry_from_curl(curl_command):
+    """从一条 read 请求的 curl 生成阅读池条目；不是 read 报文时返回 None"""
+    info = parse_curl_request(curl_command)
+    if not info or not info['body']:
+        return None
+    try:
+        payload = json.loads(info['body'])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or any(f not in payload for f in POOL_FIELDS):
+        return None
+    entry = {
+        'b': payload['b'],
+        'bookId': _book_id_from_headers(info['headers']),
+        'c': payload['c'],
+        'ci': payload['ci'],
+        'co': payload['co'],
+        'sm': payload['sm'],
+        'pr': payload['pr'],
+    }
+    # 记住这条抓包的 referer：多条抓包时，会话选哪本书就用哪本书的 referer，
+    # 避免「referer 指向 A 书、报文里却在读 B 书」的交叉矛盾
+    referer = next((v for k, v in info['headers'].items() if k.lower() == 'referer'), '')
+    if referer:
+        entry['referer'] = referer
+    return entry
+
+
+def merge_pool(*pools):
+    """按 (b, c, co) 去重合并多个阅读池，靠前的优先"""
+    merged, seen = [], set()
+    for pool in pools:
+        for entry in pool or []:
+            key = (str(entry.get('b')), str(entry.get('c')), entry.get('co'))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(entry)
+    return merged
+
+
+_extra_bash = [os.getenv(f'WXREAD_CURL_BASH_{i}') for i in range(2, 6)]
+CURL_POOL = []
+for _curl in split_curls(curl_str) + [c for c in _extra_bash if c and c.strip()]:
+    _entry = entry_from_curl(_curl)
+    if _entry:
+        CURL_POOL.append(_entry)
+
+# 有抓包条目时就用抓包条目（即你真正在读的书），默认条目仅在完全没有可用抓包时兜底
+READ_POOL = merge_pool(CURL_POOL, EXTRA_POOL) or list(DEFAULT_POOL)

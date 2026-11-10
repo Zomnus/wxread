@@ -90,18 +90,22 @@ def format_entry(entry):
 
 
 def append_to_config(entry_text, config_path):
-    """把条目追加到 config.py 的 READ_POOL 列表末尾"""
+    """把条目追加到 config.py 的 EXTRA_POOL 列表末尾
+
+    说明：正常使用不需要本工具——main.py 会自动把 WXREAD_CURL_BASH 里的
+    read 报文解析成阅读池条目。这里只用于把某几页"写死"进代码。
+    """
     with open(config_path, encoding='utf-8') as f:
         content = f.read()
 
-    marker = 'READ_POOL = ['
+    marker = 'EXTRA_POOL = ['
     pos = content.find(marker)
     if pos == -1:
-        raise SystemExit(f"{config_path} 中未找到 READ_POOL")
+        raise SystemExit(f"{config_path} 中未找到 EXTRA_POOL")
 
     close = content.find('\n]', pos)
     if close == -1:
-        raise SystemExit("未找到 READ_POOL 的结束括号 ]")
+        raise SystemExit("未找到 EXTRA_POOL 的结束括号 ]")
 
     new_content = content[:close] + '\n' + entry_text + content[close:]
     with open(config_path, 'w', encoding='utf-8') as f:

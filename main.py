@@ -14,7 +14,7 @@ from push import push
 from log_utils import setup_logging
 from config import (
     data, headers, cookies, READ_NUM, PUSH_METHOD, START_JITTER_MAX,
-    READ_POOL, COOKIE_EXPORT_PATH, WEREAD_API_KEY, curl_str,
+    READ_POOL, CURL_POOL, COOKIE_EXPORT_PATH, WEREAD_API_KEY, curl_str,
 )
 
 # ---------------------------------------------------------------------------
@@ -318,6 +318,41 @@ def validate_credentials():
 # ---------------------------------------------------------------------------
 # 阅读会话主循环
 # ---------------------------------------------------------------------------
+def resolve_book_id(session):
+    """取当前条目的数字 bookId，缺失时回退到池内任意非空值
+
+    抓包自动识别的条目，bookId 来自 referer 的 bookDetail 链接；
+    若抓包没带 referer，则借用池内其它条目的 bookId（仅用于 synckey 修复），
+    全部缺失时返回空字符串，调用方跳过修复。
+    """
+    def _usable(value):
+        value = str(value or '').strip()
+        return value if value and not value.startswith('TODO') else ''
+
+    book_id = _usable(session.get('bookId'))
+    if book_id:
+        return book_id
+    for entry in READ_POOL:
+        book_id = _usable(entry.get('bookId'))
+        if book_id:
+            return book_id
+    return ''
+
+
+def apply_session_referer(session):
+    """把 headers 里的 referer 换成当前书页的 referer
+
+    多条抓包时 config.headers 只保留了最后一条的 referer，与随机选中的书
+    可能不一致（真实浏览器里 referer 一定是当前阅读页）；这里按会话同步。
+    """
+    referer = session.get('referer')
+    if not referer:
+        return
+    key = next((k for k in headers if k.lower() == 'referer'), None)
+    if key:
+        headers[key] = referer
+
+
 def run_session(refresh_print):
     """执行一次完整阅读会话
 
@@ -334,9 +369,11 @@ def run_session(refresh_print):
     logging.info("配置阅读 %d 次，本次随机化为 %d 次。", READ_NUM, read_num)
 
     session = random.choice(READ_POOL)
+    session_book_id = resolve_book_id(session)
+    apply_session_referer(session)
     logging.info(
         "本次会话书籍 bookId=%s（ci=%s，起始 co=%s）",
-        session['bookId'], session['ci'], session['co'],
+        session_book_id or '未知（抓包未带 referer）', session['ci'], session['co'],
     )
     progress = 0
     credited_seconds = 0
@@ -445,8 +482,12 @@ def run_session(refresh_print):
                     synckey_repair_attempts,
                     SYNCKEY_REPAIR_LIMIT,
                 )
+                if not session_book_id:
+                    logging.warning("当前条目缺少数字 bookId，跳过 synckey 修复（不影响正常上报）")
+                    time.sleep(SYNCKEY_REPAIR_DELAY)
+                    continue
                 try:
-                    fix_no_synckey(session['bookId'])
+                    fix_no_synckey(session_book_id)
                 except RequestException as exc:
                     ERROR_CODE = f"synckey 修复请求失败：{exc}"
                     logging.error(ERROR_CODE)
@@ -497,7 +538,17 @@ def main():
     # 先校验抓包配置，避免无效 cookie 白等一轮启动抖动
     validate_credentials()
 
-    placeholder_books = [e['bookId'] for e in READ_POOL if str(e.get('bookId', '')).startswith('TODO')]
+    # 池来源自检：抓包报文里的 b/c/ci/co/sm/pr 会被自动识别成池条目
+    if CURL_POOL:
+        logging.info("阅读池：%d 条（由抓包报文自动识别，共 %d 条抓包）", len(READ_POOL), len(CURL_POOL))
+    else:
+        logging.warning(
+            "阅读池：%d 条（未从 WXREAD_CURL_BASH 识别到 read 报文，使用默认条目；"
+            "想加入自己正在读的书，抓一条 read 请求塞进同一个 secret 即可）",
+            len(READ_POOL),
+        )
+
+    placeholder_books = [e.get('bookId') for e in READ_POOL if str(e.get('bookId', '')).startswith('TODO')]
     if placeholder_books:
         logging.warning("READ_POOL 中存在未补全的 bookId 占位符：%s（synckey 修复会失败）", placeholder_books)
 

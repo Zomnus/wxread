@@ -80,7 +80,7 @@ class TestFormatAndAppend(unittest.TestCase):
         self.assertIn('"b": "36d3', text)         # 字符串加引号
 
     def test_append_to_config_and_reload(self):
-        """追加到 config.py 副本后，重新加载应得到 2 个结构合法的条目"""
+        """追加到 config.py 副本的 EXTRA_POOL 后，重新加载应得到结构合法的条目"""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_config = os.path.join(tmp, 'config.py')
             shutil.copy(os.path.join(ROOT, 'config.py'), tmp_config)
@@ -92,11 +92,12 @@ class TestFormatAndAppend(unittest.TestCase):
             cfg = importlib.util.module_from_spec(mod_spec)
             mod_spec.loader.exec_module(cfg)
 
-            self.assertEqual(len(cfg.READ_POOL), 2)
+            # 有手工条目时不再混入默认三体条目
+            self.assertEqual(len(cfg.READ_POOL), 1)
             required = {'b', 'bookId', 'c', 'ci', 'co', 'sm', 'pr'}
             for item in cfg.READ_POOL:
                 self.assertTrue(required.issubset(item.keys()))
-            self.assertEqual(cfg.READ_POOL[1]['bookId'], '3300060341')
+            self.assertEqual(cfg.READ_POOL[0]['bookId'], '3300060341')
 
     def test_convert_roundtrip_on_new_entry(self):
         """新条目对应的字段经 config.convert 闭环不受影响（工具产出的 curl 仍可被解析）"""

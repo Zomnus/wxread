@@ -43,6 +43,25 @@ Fork 仓库 → 启用 Actions → 抓包获取 cURL → 配置 Secrets / Variab
 
 支持三种复制格式（bash 单引号 / Windows cmd 双引号 / 新版 Chrome 的 `$'...'`），解析器都能处理。
 
+### 2.1 想读多本书？多抓几条就行（不用填任何字段）
+
+脚本会自动从这条请求的**报文**里读出 `b/c/ci/co/sm/pr` 作为阅读池条目（`bookId` 从 `referer` 的 `bookDetail` 链接推断），所以换书/加书只是"多抓一条"：
+
+1. 打开另一本书，翻一页，同样复制它的 `read` 请求；
+2. 与原有命令**用空行隔开**，一起粘贴进同一个 secret `WXREAD_CURL_BASH`：
+
+   ```text
+   curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":3,...}'
+
+   curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":5,...}'
+   ```
+
+   也可以分别放进 `WXREAD_CURL_BASH_2`、`_3`、`_4`、`_5`（见 3.1 表格）。
+
+3. 运行后日志会打印 `阅读池：N 条（由抓包报文自动识别，共 N 条抓包）`，确认条数对不对。
+
+> 只要抓包可用，默认的三体条目就不再参与随机（避免读到与你书架无关的书）；完全没识别到 `read` 报文时才回退默认条目。
+
 ---
 
 ## 3. 配置 Secrets 与 Variables
@@ -53,7 +72,8 @@ Fork 仓库 → 启用 Actions → 抓包获取 cURL → 配置 Secrets / Variab
 
 | Secret | 是否必填 | 说明 |
 | --- | --- | --- |
-| `WXREAD_CURL_BASH` | ✅ **必填** | 第 2 步复制的完整 cURL 命令，整段粘贴为一个 secret 值 |
+| `WXREAD_CURL_BASH` | ✅ **必填** | 第 2 步复制的完整 cURL 命令，整段粘贴为一个 secret 值；多条可用空行隔开一起放 |
+| `WXREAD_CURL_BASH_2` … `_5` | 可选 | 额外的 `read` 抓包（格式同上），用于多本书/多页随机，见 2.1 |
 | `PUSH_METHOD` | 需要推送时必填 | `pushplus` / `wxpusher` / `telegram` / `serverchan` 四选一 |
 | `PUSHPLUS_TOKEN` | 按渠道 | PushPlus token，[获取](https://www.pushplus.plus/uc.html) |
 | `WXPUSHER_SPT` | 按渠道 | WxPusher SPT，[获取](https://wxpusher.zjiecode.com/docs/#/?id=获取spt) |
@@ -66,7 +86,7 @@ Fork 仓库 → 启用 Actions → 抓包获取 cURL → 配置 Secrets / Variab
 
 | Variable | 默认 | 说明 |
 | --- | --- | --- |
-| `READ_NUM` | 40 | 阅读次数，每次约 30 秒。40 ≈ 20 分钟；只做每日挑战可设 2；要 60 分钟设 120 |
+| `READ_NUM` | 40 | 阅读次数，每次间隔 25–45 秒随机。40 ≈ 20 分钟；只做每日挑战可设 2；要 60 分钟设 120 |
 | `START_JITTER_MAX` | 2700 | 启动随机抖动上限（秒）。触发后随机休眠 0~45 分钟，避免固定时刻；设 0 禁用 |
 
 > 记忆口诀：**只有 `READ_NUM` 和 `START_JITTER_MAX` 放 Variables，其余全放 Secrets。**
@@ -117,6 +137,7 @@ Fork 仓库 → 启用 Actions → 抓包获取 cURL → 配置 Secrets / Variab
 | --- | --- |
 | `HTTP 后端：curl_cffi（已模拟 chrome ...）` | 指纹模拟已生效 |
 | `启动抖动：休眠 xxx 秒` | 本次实际随机到的延迟 |
+| `阅读池：N 条（由抓包报文自动识别…）` | 识别到的书页条目数（多条抓包时会有多条） |
 | `本次会话书籍 bookId=...` | 本次选中的书页元组 |
 | `阅读进度: 第 n/40 次，已计入 x.x 分钟` | 每条成功上报的累计计入时长 |
 | `最新 cookie 已导出到 latest_cookie.txt` | 回写数据已生成 |
@@ -147,6 +168,8 @@ Fork 仓库 → 启用 Actions → 抓包获取 cURL → 配置 Secrets / Variab
 | 日志提示 `WXREAD_CURL_BASH 解析失败：缺少 cookie 字段 wr_skey` | 抓包命令不完整。重新复制 `/web/book/read` 的 **Copy as cURL (bash)**，确认包含 `-H 'cookie: ...'` |
 | 日志 `连续 5 次阅读请求失败，终止运行` | 网络问题或 cookie 失效。检查 cookie；Actions 出口在海外，偶发超时会自动退避重试 4 次 |
 | 时长没增加 / 增加得比预期少 | 先配 `WEREAD_API_KEY` 核对“今日实际计入”；再把每日时长降到 10~30 分钟的自然区间 |
+| 想换一本书读 / 读多本书 | 打开那本书翻一页，复制它的 `read` 请求，用空行隔开追加到 `WXREAD_CURL_BASH`（或放 `_2`…`_5`），无需改代码，见 2.1 |
+| 日志显示 `阅读池：1 条（…使用默认条目）` | 说明 secret 里没识别到 `read` 报文（可能抓成了别的接口）。重新复制 `/web/book/read` 请求即可 |
 | 推送收不到 | 确认 `PUSH_METHOD` 拼写（小写）、对应 token 已填；wxpusher 会用 SPT 直接发消息，需先关注对应应用 |
 | 定时任务几天后不再触发 | 仓库 60 天无活动被 GitHub 停用；本项目已内置 keepalive，如仍停用可在 Actions 页面点 “Enable workflow” |
 | fork 后一直没有自动运行 | 定时 workflow 在 fork 中默认不启用，需按第 1 步手动启用 |
