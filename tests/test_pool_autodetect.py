@@ -122,6 +122,28 @@ class TestAutoDetect(PoolTestBase):
         cfg = self.load(WXREAD_CURL_BASH=curl)
         self.assertEqual(cfg.CURL_POOL[0]['bookId'], '')
 
+    def test_book_id_from_label_comment(self):
+        """抓包没带 referer 时，"# 书名 3300060341" 注释里的数字可作为 bookId"""
+        curl = _curl('https://weread.qq.com/web/book/read', BOOK_A)
+        cfg = self.load(WXREAD_CURL_BASH='# 三体 3300060341\n' + curl)
+        self.assertEqual(cfg.CURL_POOL[0]['bookId'], '3300060341')
+        self.assertEqual(cfg.CURL_POOL[0]['label'], '三体')
+
+    def test_book_id_from_label_with_pipe(self):
+        """"# 书名|3300060341" 竖线分隔同样支持"""
+        curl = _curl('https://weread.qq.com/web/book/read', BOOK_A)
+        cfg = self.load(WXREAD_CURL_BASH='# 沙丘|4400012345\n' + curl)
+        self.assertEqual(cfg.CURL_POOL[0]['bookId'], '4400012345')
+        self.assertEqual(cfg.CURL_POOL[0]['label'], '沙丘')
+
+    def test_referer_book_id_takes_priority_over_label(self):
+        """referer 与注释同时存在时以 referer 推断为准"""
+        curl = _curl('https://weread.qq.com/web/book/read', BOOK_A,
+                     referer='https://weread.qq.com/web/bookDetail/3300060341')
+        cfg = self.load(WXREAD_CURL_BASH='# 三体 9999999999\n' + curl)
+        self.assertEqual(cfg.CURL_POOL[0]['bookId'], '3300060341')
+        self.assertEqual(cfg.CURL_POOL[0]['label'], '三体 9999999999')
+
     def test_no_env_uses_default_pool(self):
         cfg = self.load()
         self.assertEqual(cfg.CURL_POOL, [])

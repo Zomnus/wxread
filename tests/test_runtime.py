@@ -15,11 +15,24 @@ import push as push_module
 
 
 class FakeResponse:
+    """read 接口的假响应：succ + synckey，供会话循环测试使用"""
     status_code = 200
-    text = '{"code":200}'
+    text = '{"succ": 1, "synckey": 12345}'
 
     def json(self):
         return {"succ": 1, "synckey": 12345}
+
+    def raise_for_status(self):
+        return None
+
+
+class FakePushResponse:
+    """推送渠道的假响应：WxPusher 成功码为 1000"""
+    status_code = 200
+    text = '{"code":1000}'
+
+    def json(self):
+        return {"code": 1000}
 
     def raise_for_status(self):
         return None
@@ -31,7 +44,7 @@ class TestPushEncoding(unittest.TestCase):
     def test_wxpusher_content_is_percent_encoded(self):
         notifier = push_module.PushNotification()
         content = "完成 #话题 20/40 分钟\n第二行"
-        with mock.patch.object(push_module.requests, "get", return_value=FakeResponse()) as get:
+        with mock.patch.object(push_module.requests, "get", return_value=FakePushResponse()) as get:
             self.assertTrue(notifier.push_wxpusher(content, "SPT123"))
         url = get.call_args[0][0]
         self.assertNotIn("#", url)
@@ -147,6 +160,58 @@ class TestFailureHandling(unittest.TestCase):
                 mock.patch.object(main, "effective_read_num", lambda n: 2):
             with self.assertRaises(RuntimeError):
                 main.run_session(lambda message: None)
+
+
+class TestSynckeyRotation(unittest.TestCase):
+    """缺 synckey 且无法修复时应换书继续，全部条目失败才终止"""
+
+    @staticmethod
+    def _resp(payload):
+        resp = mock.Mock()
+        resp.status_code = 200
+        resp.json.return_value = payload
+        return resp
+
+    def _make_pool(self):
+        return [
+            {"label": "A", "b": "aaaa", "bookId": "", "c": "ca", "ci": 1, "co": 10, "sm": "甲", "pr": 1},
+            {"label": "B", "b": "bbbb", "bookId": "123456", "c": "cb", "ci": 2, "co": 20, "sm": "乙", "pr": 2},
+        ]
+
+    def test_rotates_and_terminates_when_all_entries_fail(self):
+        """A 无 bookId 且缺 synckey → 立即换到 B；B 修复 3 次无效 → 全部失败终止"""
+        pool = self._make_pool()
+
+        with mock.patch.object(main, "READ_POOL", pool), \
+                mock.patch.object(main, "http_post", mock.Mock(return_value=self._resp({"succ": 1}))), \
+                mock.patch.object(main, "fix_no_synckey", lambda book_id: None), \
+                mock.patch.object(main.time, "sleep", lambda s: None), \
+                mock.patch.object(main, "push", lambda *a, **k: False), \
+                mock.patch.object(main, "effective_read_num", lambda n: 3):
+            with self.assertRaises(RuntimeError) as ctx:
+                main.run_session(lambda message: None)
+        # 终止消息里应包含换书统计与修复建议
+        self.assertIn("全部 2 个条目", str(ctx.exception))
+        self.assertIn("bookId", str(ctx.exception))
+
+    def test_session_continues_when_other_entry_has_synckey(self):
+        """A 缺 synckey 换到 B 后，B 的正常响应让会话继续完成"""
+        pool = self._make_pool()
+
+        def fake_post(url, **kwargs):
+            payload = json.loads(kwargs["data"])
+            if payload["b"] == "aaaa":
+                return self._resp({"succ": 1})                      # A 一直缺 synckey
+            return self._resp({"succ": 1, "synckey": 1})            # B 正常
+
+        with mock.patch.object(main, "READ_POOL", pool), \
+                mock.patch.object(main, "http_post", fake_post), \
+                mock.patch.object(main, "fix_no_synckey", lambda book_id: None), \
+                mock.patch.object(main.time, "sleep", lambda s: None), \
+                mock.patch.object(main, "effective_read_num", lambda n: 2), \
+                mock.patch.object(main.random, "choice", lambda seq: seq[0]):
+            completed, credited, _ = main.run_session(lambda message: None)
+        self.assertEqual(completed, 2)
 
 
 class TestCredentialValidation(unittest.TestCase):

@@ -39,6 +39,27 @@ class PushNotification:
             if value
         }
 
+    @staticmethod
+    def _check_business_code(channel, response, hints):
+        """HTTP 200 不代表推送成功——各渠道用业务码表示配置/参数错误。
+
+        配置类错误重试也不会成功，识别到后直接给出修复提示并放弃重试。
+        返回 True 表示业务成功。
+        """
+        try:
+            result = response.json()
+        except ValueError:
+            return True  # 非 JSON 响应交由 HTTP 状态码判断
+        code = result.get('code')
+        success_codes = {'wxpusher': 1000, 'serverchan': 0, 'pushplus': 200}
+        if code == success_codes.get(channel):
+            return True
+        msg = result.get('msg') or result.get('message') or response.text[:120]
+        logger.error("%s 推送被拒绝：code=%s，msg=%s", channel, code, msg)
+        if hints:
+            logger.error("排查提示：%s", hints)
+        return False
+
     def push_pushplus(self, content, token, is_success):
         attempts = PUSH_ATTEMPTS
         title = f"微信阅读-{'成功' if is_success else '失败'}"
@@ -48,6 +69,11 @@ class PushNotification:
                     self.pushplus_url,
                     data=json.dumps({"token": token, "title": title,"content": content,}).encode("utf-8"),headers=self.headers,timeout=10,)
                 response.raise_for_status()
+                if not self._check_business_code(
+                    'pushplus', response,
+                    "检查 PUSHPLUS_TOKEN 是否正确（pushplus.hxtrip.com 后台获取）",
+                ):
+                    return False
                 logger.info("PushPlus 响应: %s", response.text)
                 return True
             except requests.exceptions.RequestException as exc:
@@ -88,6 +114,12 @@ class PushNotification:
             try:
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
+                if not self._check_business_code(
+                    'wxpusher', response,
+                    "code=1000/spt格式错误 通常是 WXPUSHER_SPT 不对：应为 wxpusher.zjiecode.com"
+                    "「极简推送」页面给出的完整 spt（SPT 开头），检查是否混入空格或引号",
+                ):
+                    return False
                 logger.info("WxPusher 响应: %s", response.text)
                 return True
             except requests.exceptions.RequestException as exc:
@@ -113,6 +145,11 @@ class PushNotification:
                     timeout=10,
                 )
                 response.raise_for_status()
+                if not self._check_business_code(
+                    'serverchan', response,
+                    "检查 SERVERCHAN_SPT 是否正确（sct.ftqq.com 的 SendKey）",
+                ):
+                    return False
                 logger.info("ServerChan 响应: %s", response.text)
                 return True
             except requests.exceptions.RequestException as exc:

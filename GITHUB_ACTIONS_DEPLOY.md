@@ -71,7 +71,17 @@ curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...",
 ```
 
 > 只要抓包可用，默认的三体条目就不再参与随机（避免读到与你书架无关的书）；完全没识别到 `read` 报文时才回退默认条目。
-> 抓包未带 referer 时日志里 bookId 显示「未知」——只影响极少数情况下的 synckey 自动修复，正常上报不受影响；想知道数字 bookId，去书籍详情页 URL 末尾看（`weread.qq.com/web/bookDetail/3300060341`）。
+> 抓包未带 referer 时日志里 bookId 显示「未知」——此时 synckey 无法自动修复，**推荐在 `# 书名` 注释里顺手带上 bookId**（见下）；想知道数字 bookId，去书籍详情页 URL 末尾看（`weread.qq.com/web/bookDetail/3300060341`）。
+
+**进阶：注释里带上 bookId**。写法 `# 书名 3300060341` 或 `# 书名|3300060341`，脚本会提取数字作为 bookId（referer 优先）。带上后某本书返回缺 `synckey` 时能自动调 chapterInfos 修复，不用换书：
+
+```text
+# 三体 3300060341
+curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":4,...}'
+
+# 沙丘|4400012345
+curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...","ci":3,...}'
+```
 
 ---
 
@@ -150,6 +160,7 @@ curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...",
 | `启动抖动：休眠 xxx 秒` | 本次实际随机到的延迟 |
 | `阅读池条目 n/N：…` + `阅读池：N 条…` | 识别到的书页条目明细与总数 |
 | `本次会话书籍：…` | 本次选中的书页元组（标签/bookId/章节/摘要） |
+| `无 synckey…切换到其它条目（剩余 N 个）` | 当前书拿不到 synckey，已自动换书继续；全部换完仍失败才终止 |
 | `阅读进度: 第 n/40 次，已计入 x.x 分钟` | 每条成功上报的累计计入时长 |
 | `最新 cookie 已导出到 latest_cookie.txt` | 回写数据已生成 |
 
@@ -178,7 +189,10 @@ curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...",
 | workflow 文件报 `Unrecognized named-value: 'secrets'` | 已修复（secrets 不能用于 `if`）。若你改动过 workflow，注意 secrets 只能放在 `env` / `with` 中 |
 | 日志提示 `WXREAD_CURL_BASH 解析失败：缺少 cookie 字段 wr_skey` | 抓包命令不完整。重新复制 `/web/book/read` 的 **Copy as cURL (bash)**，确认包含 `-H 'cookie: ...'` |
 | 日志 `连续 5 次阅读请求失败，终止运行` | 网络问题或 cookie 失效。检查 cookie；Actions 出口在海外，偶发超时会自动退避重试 4 次 |
+| 日志 `无 synckey…切换到其它条目` | 某本书的阅读状态不同步，脚本已自动换其它书继续，无需处理；若想修复该书，在注释里带上 bookId（见 2.1 进阶） |
+| 日志 `全部 N 个条目均无法获得 synckey，终止运行` | 所有抓包都没带 referer 且注释没写 bookId，缺 synckey 时无法自动修复。按 2.1 进阶写法补 bookId，或从书籍详情页进入阅读后重新抓包 |
 | 时长没增加 / 增加得比预期少 | 先配 `WEREAD_API_KEY` 核对“今日实际计入”；再把每日时长降到 10~30 分钟的自然区间 |
+| 推送报 `WxPusher 推送被拒绝：code=…，msg=spt格式错误` | `WXPUSHER_SPT` 填错了：应为 wxpusher.zjiecode.com「极简推送」页面给出的完整 spt（`SPT` 开头），检查是否混入空格/引号，或复制成了别的字段 |
 | 想换一本书读 / 读多本书 | 打开那本书翻一页，复制它的 `read` 请求，用空行隔开追加到 `WXREAD_CURL_BASH`（或放 `_2`…`_5`），无需改代码，见 2.1 |
 | 日志显示 `阅读池：1 条（…使用默认条目）` | 说明 secret 里没识别到 `read` 报文（可能抓成了别的接口）。重新复制 `/web/book/read` 请求即可 |
 | 推送收不到 | 确认 `PUSH_METHOD` 拼写（小写）、对应 token 已填；wxpusher 会用 SPT 直接发消息，需先关注对应应用 |

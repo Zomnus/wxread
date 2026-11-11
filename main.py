@@ -380,17 +380,49 @@ def run_session(refresh_print):
     read_num = effective_read_num(READ_NUM)
     logging.info("配置阅读 %d 次，本次随机化为 %d 次。", READ_NUM, read_num)
 
-    session = random.choice(READ_POOL)
-    session_book_id = resolve_book_id(session)
-    apply_session_referer(session)
-    logging.info("本次会话书籍：%s", describe_entry(session))
+    failed_keys = set()
+
+    def entry_key(entry):
+        return (entry['b'], entry['c'], entry.get('ci'), entry.get('co'))
+
+    session = None
+    session_book_id = ''
     progress = 0
+    synckey_repair_attempts = 0
+
+    def use_entry(entry):
+        """选定一个书页条目开始/继续会话"""
+        nonlocal session, session_book_id, progress, synckey_repair_attempts
+        session = entry
+        session_book_id = resolve_book_id(session)
+        apply_session_referer(session)
+        progress = 0
+        synckey_repair_attempts = 0
+        logging.info("本次会话书籍：%s", describe_entry(session))
+
+    def rotate_entry(reason):
+        """当前条目持续拿不到 synckey → 换池中其它条目；全部失败才终止"""
+        failed_keys.add(entry_key(session))
+        remaining = [e for e in READ_POOL if entry_key(e) not in failed_keys]
+        if not remaining:
+            ERROR_CODE = (
+                f"{reason}；阅读池全部 {len(READ_POOL)} 个条目均无法获得 synckey，终止运行。"
+                "常见原因：抓包未带 referer 且注释未写 bookId（synckey 无法自动修复），"
+                "或书籍阅读状态不同步。建议从书籍详情页重新抓包，"
+                "或在每条抓包前的注释里带上 bookId（如 \"# 书名 3300060341\"）。"
+            )
+            logging.error(ERROR_CODE)
+            push(ERROR_CODE, PUSH_METHOD, is_success=False)
+            raise RuntimeError(ERROR_CODE)
+        logging.warning("%s，切换到其它条目（剩余 %d 个）", reason, len(remaining))
+        use_entry(random.choice(remaining))
+
+    use_entry(random.choice(READ_POOL))
     credited_seconds = 0
     session_start = time.time()
 
     index = 1
     lastTime = int(time.time()) - 30
-    synckey_repair_attempts = 0
     consecutive_failures = 0
 
     while index <= read_num:
@@ -481,10 +513,10 @@ def run_session(refresh_print):
             else:
                 synckey_repair_attempts += 1
                 if synckey_repair_attempts > SYNCKEY_REPAIR_LIMIT:
-                    ERROR_CODE = f"连续 {SYNCKEY_REPAIR_LIMIT} 次未恢复 synckey，终止运行。"
-                    logging.error(ERROR_CODE)
-                    push(ERROR_CODE, PUSH_METHOD, is_success=False)
-                    raise RuntimeError(ERROR_CODE)
+                    # 持续拿不到 synckey 通常意味着这本书的阅读状态不同步，
+                    # 换池中其它书继续（全部条目都失败才终止）
+                    rotate_entry(f"连续 {SYNCKEY_REPAIR_LIMIT} 次未恢复 synckey")
+                    continue
 
                 logging.warning(
                     "无 synckey，尝试修复（%d/%d）...",
@@ -492,16 +524,14 @@ def run_session(refresh_print):
                     SYNCKEY_REPAIR_LIMIT,
                 )
                 if not session_book_id:
-                    logging.warning("当前条目缺少数字 bookId，跳过 synckey 修复（不影响正常上报）")
-                    time.sleep(SYNCKEY_REPAIR_DELAY)
+                    # 没有 bookId 就无法修复，重试同一本书没有意义，直接换书
+                    rotate_entry("当前条目缺少数字 bookId，synckey 无法自动修复")
                     continue
                 try:
                     fix_no_synckey(session_book_id)
                 except RequestException as exc:
-                    ERROR_CODE = f"synckey 修复请求失败：{exc}"
-                    logging.error(ERROR_CODE)
-                    push(ERROR_CODE, PUSH_METHOD, is_success=False)
-                    raise RuntimeError(ERROR_CODE) from exc
+                    # 修复请求失败不直接终止：再试一次或换其它条目
+                    logging.warning("synckey 修复请求失败（稍后重试或换书）：%s", exc)
                 time.sleep(SYNCKEY_REPAIR_DELAY)
         else:
             consecutive_failures += 1

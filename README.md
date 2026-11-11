@@ -50,9 +50,9 @@ curl 'https://weread.qq.com/web/book/read' ... --data-raw '{"b":"...","c":"...",
 ```
 
 - 用**空行隔开**粘贴进同一个 secret `WXREAD_CURL_BASH`，或分别放到 `WXREAD_CURL_BASH_2` … `_5`；
-- 每条前可写一行 `# 书名` 注释（如 `# 三体`），日志里就用这个名字标识这条抓包；
+- 每条前可写一行 `# 书名` 注释（如 `# 三体`），日志里就用这个名字标识这条抓包；顺手带上数字 bookId（如 `# 三体 3300060341`）可在缺 synckey 时自动修复，不用换书；
 - 运行日志会显示 `阅读池：N 条（由抓包报文自动识别，共 N 条抓包）` 并逐条列出池内容（标签/bookId/章节/摘要），据此确认生效；
-- 同一条抓包重复粘贴会自动去重。
+- 同一条抓包重复粘贴会自动去重；某本书持续返回缺 synckey 时会**自动换其它书继续**，全部条目失败才终止。
 
 > 想把某几页写死进代码（而非放在 secret 里）时，仍可用旧工具：`python3 tools/capture_to_pool.py capture.txt --append`，条目会写入 `config.py` 的 `EXTRA_POOL`。
 
@@ -65,7 +65,7 @@ START_JITTER_MAX=0 python3 main.py          # 跳过启动抖动，立即执行�
 ```
 
 ```bash
-python3 -m unittest discover -s tests -v    # 75 个用例：签名回归/解析/导出/随机化/运行期行为/阅读池识别
+python3 -m unittest discover -s tests -v    # 80 个用例：签名回归/解析/导出/随机化/运行期行为/阅读池识别/换书容错
 ```
 
 也可以直接修改 `config.py` 里的 `READ_NUM`、`EXTRA_POOL`、headers、cookies 后运行，或参考 `.env.example` 用环境变量注入。

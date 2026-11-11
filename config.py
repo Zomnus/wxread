@@ -284,8 +284,15 @@ def _book_id_from_headers(headers):
     return match.group(1) if match else ''
 
 
+LABEL_BOOK_ID_RE = re.compile(r'(\d{5,})')
+
+
 def entry_from_curl(curl_command, label=''):
-    """从一条 read 请求的 curl 生成阅读池条目；不是 read 报文时返回 None"""
+    """从一条 read 请求的 curl 生成阅读池条目；不是 read 报文时返回 None
+
+    label 支持 "# 书名 3300060341" / "# 书名|3300060341" 写法：注释里的
+    数字 bookId 用于 synckey 修复（抓包没带 referer 时唯一能补上 bookId 的方式）。
+    """
     info = parse_curl_request(curl_command)
     if not info or not info['body']:
         return None
@@ -295,11 +302,20 @@ def entry_from_curl(curl_command, label=''):
         return None
     if not isinstance(payload, dict) or any(f not in payload for f in POOL_FIELDS):
         return None
+    book_id = _book_id_from_headers(info['headers'])
+    if not book_id:
+        # referer 缺失时，从 "# 书名 3300060341" 这类注释里提取 bookId
+        match = LABEL_BOOK_ID_RE.search(label)
+        if match:
+            book_id = match.group(1)
+            # 从 label 中去掉已识别的 bookId 部分，保留纯书名
+            label = LABEL_BOOK_ID_RE.sub('', label)
+            label = re.sub(r'[|\-–—:：]\s*$', '', label).strip()
     entry = {
         # label：粘贴时写在抓包前的 "# 书名" 注释，日志里用来标识条目
         'label': label,
         'b': payload['b'],
-        'bookId': _book_id_from_headers(info['headers']),
+        'bookId': book_id,
         'c': payload['c'],
         'ci': payload['ci'],
         'co': payload['co'],
