@@ -45,6 +45,8 @@ jobs:
 
     - name: Run deployment script
       env:
+        # 让脚本日志打印北京时间（runner 默认 UTC，日志时间戳会让人误判执行时刻）
+        TZ: "Asia/Shanghai"
         WXREAD_CURL_BASH: ${{ secrets.WXREAD_CURL_BASH }}
         PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
